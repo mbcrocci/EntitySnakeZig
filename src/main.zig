@@ -23,30 +23,6 @@ pub const grid_cell_size: i64 = 32;
 const screen_size_x: i64 = grid_size_x * grid_cell_size;
 const screen_size_y: i64 = grid_size_y * grid_cell_size;
 
-fn renderBackground() void {
-    var x: i64 = 0;
-    var y: i64 = 0;
-    const fgrid = @intToFloat(f32, grid_cell_size);
-
-    while (y < grid_size_y) : (y += 1) {
-        x = 0;
-        while (x < grid_size_x) : (x += 1) {
-            const fx = @intToFloat(f32, x);
-            const fy = @intToFloat(f32, y);
-
-            DrawTexturePro(sprites.grass.texture.*, sprites.grass.sourceRect, .{
-                .x = fx * fgrid,
-                .y = fy * fgrid,
-                .width = fgrid,
-                .height = fgrid,
-            }, .{
-                .x = 0,
-                .y = 0,
-            }, 0, LIGHTGRAY);
-        }
-    }
-}
-
 fn directionCanChange(current: Direction, next: Direction) bool {
     return !((current == next) or
         (current == .left and next == .right) or
@@ -55,7 +31,7 @@ fn directionCanChange(current: Direction, next: Direction) bool {
         (current == .up and next == .down));
 }
 
-fn isOutsideScreen(position: *Position) bool {
+fn isOutsideScreen(position: *const Position) bool {
     return position.x < 0 or
         position.x > grid_size_x or
         position.y < 0 or
@@ -120,17 +96,34 @@ fn truePositionRect(t: EntityType, pos: Position) Rectangle {
 }
 
 fn rectanglesIntersect(r1: Rectangle, r2: Rectangle) bool {
+    return r1.x < r2.x + r2.width and
+        r1.x + r1.width > r2.x and
+        r1.y > r2.y + r2.height and
+        r1.y + r1.height < r2.y;
+}
 
+fn renderBackground() void {
+    var x: i64 = 0;
+    var y: i64 = 0;
+    const fgrid = @intToFloat(f32, grid_cell_size);
 
-    return r1.x < r2.width and
-        r1.width > r2.x and
-        r1.y > r2.y and
-        r1.height < r2.y;
+    while (y < grid_size_y) : (y += 1) {
+        x = 0;
+        while (x < grid_size_x) : (x += 1) {
+            const fx = @intToFloat(f32, x);
+            const fy = @intToFloat(f32, y);
 
-    // return r1.x < r2.x + r2.width and
-    //     r1.x + r1.width > r2.x and
-    //     r1.y > r2.y + r2.height and
-    //     r1.y + r1.height < r2.y;
+            DrawTexturePro(sprites.grass.texture.*, sprites.grass.sourceRect, .{
+                .x = fx * fgrid,
+                .y = fy * fgrid,
+                .width = fgrid,
+                .height = fgrid,
+            }, .{
+                .x = 0,
+                .y = 0,
+            }, 0, LIGHTGRAY);
+        }
+    }
 }
 
 fn renderPowerups(reg: *ecs.Registry) void {
@@ -216,10 +209,41 @@ fn renderSystem(reg: *ecs.Registry) void {
     }
 }
 
+fn inputSystem(reg: *ecs.Registry) void {
+    var dir: ?Direction = null;
+
+    if (IsKeyDown(KeyboardKey.KEY_RIGHT)) {
+        dir = Direction.right;
+    } else if (IsKeyDown(KeyboardKey.KEY_LEFT)) {
+        dir = Direction.left;
+    } else if (IsKeyDown(KeyboardKey.KEY_UP)) {
+        dir = Direction.up;
+    } else if (IsKeyDown(KeyboardKey.KEY_DOWN)) {
+        dir = Direction.down;
+    }
+
+    if (dir) |ndir| {
+        var queue = reg.singletons.get(MoveQueue);
+        queue.append(ndir);
+    }
+
+    if (IsKeyReleased(KeyboardKey.KEY_D)) {
+        is_debug = if (is_debug) false else true;
+    }
+
+    // TODO
+    // 1. Fire Shot
+    // 2. Restart game
+}
+
 fn moveSystem(reg: *ecs.Registry, dt: f64) void {
     var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{});
 
     var queue = reg.singletons.get(MoveQueue);
+
+    var previous_direction: ?Direction = null;
+    var current_direction: ?Direction = null;
+    var queued_direction: ?Direction = queue.pop();
 
     var iter = view.iterator();
     while (iter.next()) |entity| {
@@ -228,10 +252,6 @@ fn moveSystem(reg: *ecs.Registry, dt: f64) void {
         var direction: *Direction = view.get(Direction, entity);
         const velocity = view.getConst(Velocity, entity);
 
-        var previous_direction: ?Direction = null;
-        var current_direction: ?Direction = null;
-        var queued_direction: ?Direction = queue.pop();
-
         if (entType == .snakeBit) {
             current_direction = direction.*;
 
@@ -239,9 +259,11 @@ fn moveSystem(reg: *ecs.Registry, dt: f64) void {
                 direction.* = new_direction;
             } else {
                 if (queued_direction) |next_direction| {
-                    const dir_change = directionCanChange(direction.*, next_direction);
-                    if (dir_change) {
-                        direction.* = next_direction;
+                    if (reg.get(SnakePart, entity).* == .head) {
+                        const dir_change = directionCanChange(direction.*, next_direction);
+                        if (dir_change) {
+                            direction.* = next_direction;
+                        }
                     }
                 }
             }
@@ -299,7 +321,10 @@ fn collisionSystem(reg: *ecs.Registry) void {
         }
     }
 
-    const hrect = truePositionRect(EntityType.snakeBit, headPos);
+    // Counldn't find the snake's head
+    if (headPos.x < 0) {
+        return;
+    }
 
     var view = reg.view(.{ Position, EntityType }, .{ SnakePart, ToClean });
     var iter = view.iterator();
@@ -308,13 +333,9 @@ fn collisionSystem(reg: *ecs.Registry) void {
         const position = view.getConst(Position, entity);
         const entType = view.getConst(EntityType, entity);
 
-        const prect = truePositionRect(entType, position);
-
-        // if (position.x == headPos.x and
-        //     position.y == headPos.y and
-        //     position.fx == headPos.fx and
-        //     position.fy == headPos.fy)
-        if (rectanglesIntersect(hrect, prect)) {
+        if (position.x == headPos.x and
+            position.y == headPos.y)
+        {
             switch (entType) {
                 .food => {
                     reg.add(entity, ToClean{ .clean = true });
@@ -322,6 +343,10 @@ fn collisionSystem(reg: *ecs.Registry) void {
                     var new_food = reg.create();
                     reg.add(new_food, Spawnable{ .entType = EntityType.food });
                     reg.add(new_food, EntityType.food);
+
+                    var new_part = reg.create();
+                    reg.add(new_part, Spawnable{ .entType = EntityType.snakeBit });
+                    reg.add(new_part, EntityType.snakeBit);
 
                     score.score += 1;
                 },
@@ -331,38 +356,16 @@ fn collisionSystem(reg: *ecs.Registry) void {
     }
 }
 
-fn inputSystem(reg: *ecs.Registry) void {
-    var dir: ?Direction = null;
-
-    if (IsKeyDown(KeyboardKey.KEY_RIGHT)) {
-        dir = Direction.right;
-    } else if (IsKeyDown(KeyboardKey.KEY_LEFT)) {
-        dir = Direction.left;
-    } else if (IsKeyDown(KeyboardKey.KEY_UP)) {
-        dir = Direction.up;
-    } else if (IsKeyDown(KeyboardKey.KEY_DOWN)) {
-        dir = Direction.down;
-    }
-
-    if (dir) |ndir| {
-        var queue = reg.singletons.get(MoveQueue);
-        queue.append(ndir);
-    }
-
-    if (IsKeyReleased(KeyboardKey.KEY_D)) {
-        is_debug = if (is_debug) false else true;
-    }
-}
-
 fn positionCheckerSystem(reg: *ecs.Registry) void {
     var view = reg.view(.{Position}, .{});
 
+    var eiter = view.entityIterator();
     var iter = view.iterator();
-    while (iter.next()) |entity| {
-        const position = view.getConst(Position, entity);
-
-        if (isOutsideScreen(&position)) {
-            reg.add(ToClean{ .clean = true }, entity);
+    while (eiter.next()) |entity| {
+        if (iter.next()) |position| {
+            if (isOutsideScreen(&position)) {
+                reg.add(entity, ToClean{ .clean = true });
+            }
         }
     }
 }
@@ -377,28 +380,86 @@ fn cleaningSystem(reg: *ecs.Registry) void {
     }
 }
 
-fn maybeCreateFood(reg: *ecs.Registry) void {
-    var rng = reg.singletons.getConst(Rng).rng.random;
+fn spawnSnakeTail(reg: *ecs.Registry) void {
+    var view = reg.view(.{ SnakePart, Position, Direction, sprites.Animation }, .{});
+    var iter = view.iterator();
+
+    // In case ther is only the head, stores it.
+    var tailEnt = iter.next() orelse 0;
+    var tailPos = view.get(Position, tailEnt).*;
+    var tailDir = view.get(Direction, tailEnt);
+
+    while (iter.next()) |entity| {
+        var pos = view.get(Position, entity);
+        var part = view.get(SnakePart, entity);
+        var dir = view.get(Direction, entity);
+        var ani = view.get(sprites.Animation, entity);
+
+        if (part.* == SnakePart.tail) {
+            tailPos = pos.*;
+            tailDir = dir;
+
+            part.* = SnakePart.body;
+            // reg.remove(SnakePart, entity);
+            // reg.add(entity, SnakePart.body);
+
+            ani.* = sprites.body;
+            // reg.remove(sprites.Animation, entity);
+            // reg.add(entity, sprites.body);
+            break;
+        }
+    }
+
+    switch (tailDir.*) {
+        .right => {
+            tailPos.x -= 1;
+            tailPos.fx -= 1;
+        },
+        .left => {
+            tailPos.x += 1;
+            tailPos.fx += 1;
+        },
+        .down => {
+            tailPos.y -= 1;
+            tailPos.fy -= 1;
+        },
+        .up => {
+            tailPos.y += 1;
+            tailPos.fy += 1;
+        },
+    }
+
+    var new_bit = reg.create();
+    reg.add(new_bit, EntityType.snakeBit);
+    reg.add(new_bit, tailDir.*);
+    reg.add(new_bit, tailPos);
+    reg.add(new_bit, Velocity{ .vx = 15, .vy = 15 });
+    reg.add(new_bit, SnakePart.tail);
+    reg.add(new_bit, sprites.tail);
+}
+
+fn spawnFood(reg: *ecs.Registry) void {
+    //var rng = reg.singletons.getConst(Rng).rng.random;
+    var rng = std.rand.Xoroshiro128.init(@intCast(u64, std.time.milliTimestamp())).random;
 
     var x = rng.intRangeAtMost(i64, 0, grid_size_x - 1);
     var y = rng.intRangeAtMost(i64, 0, grid_size_y - 1);
-    // var fx = @intToFloat(f64, x);
-    // var fy = @intToFloat(f64, y);
+    var fx = @intToFloat(f64, x);
+    var fy = @intToFloat(f64, y);
 
-    // var ppt: ?pu.PowerUpTag = null;
-    // var prob = rng.float(f32);
-    // if (prob < 0.1) {
-    //     ppt = .Invulnerable;
-    // } else if (prob < 0.2) {
-    //     ppt = .Gun;
-    // } else if (prob < 0.3) {
-    //     ppt = .ScoreMultiplier;
-    // }
+    var ppt: ?pu.PowerUpTag = null;
+    var prob = rng.float(f32);
+    if (prob < 0.1) {
+        ppt = .Invulnerable;
+    } else if (prob < 0.2) {
+        ppt = .Gun;
+    } else if (prob < 0.3) {
+        ppt = .ScoreMultiplier;
+    }
 
     var ent = reg.create();
     reg.add(ent, EntityType.food);
-    // reg.add(ent, Position{ .x = x, .y = y, .fx = fx, .fy = fy });
-    reg.add(ent, Position{ .x = x, .y = y, .fx = 5, .fy = 5 });
+    reg.add(ent, Position{ .x = x, .y = y, .fx = fx, .fy = fy });
     reg.add(ent, sprites.food);
 }
 
@@ -413,30 +474,14 @@ fn spawningSystem(reg: *ecs.Registry) void {
         reg.add(entity, ToClean{ .clean = true });
 
         switch (entType.*) {
-            .snakeBit => {},
+            .snakeBit => {
+                //spawnSnakeTail(reg);
+            },
             .food => {
-                maybeCreateFood(reg);
+                spawnFood(reg);
             },
             .shot => {},
         }
-    }
-}
-
-fn handleInput(game: *Game) !void {
-    if (IsKeyDown(KeyboardKey.KEY_RIGHT)) {
-        try game.queued_moves.append(Direction.right);
-    } else if (IsKeyDown(KeyboardKey.KEY_LEFT)) {
-        try game.queued_moves.append(Direction.left);
-    } else if (IsKeyDown(KeyboardKey.KEY_UP)) {
-        try game.queued_moves.append(Direction.up);
-    } else if (IsKeyDown(KeyboardKey.KEY_DOWN)) {
-        try game.queued_moves.append(Direction.down);
-    } else if (IsKeyDown(KeyboardKey.KEY_SPACE)) {
-        try game.maybeFireShot();
-    } else if (IsKeyReleased(KeyboardKey.KEY_R)) {
-        try game.restart();
-    } else if (IsKeyReleased(KeyboardKey.KEY_D)) {
-        is_debug = if (is_debug) false else true;
     }
 }
 
@@ -497,7 +542,7 @@ pub fn main() anyerror!void {
 
             collisionSystem(&reg);
 
-            // positionCheckerSystem(&reg);
+            positionCheckerSystem(&reg);
             spawningSystem(&reg);
 
             cleaningSystem(&reg);

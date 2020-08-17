@@ -22,13 +22,7 @@ pub fn build(b: *Builder) void {
     raylib.addAsPackage("raylib", exe);
     raylib.math.addAsPackage("raylib-math", exe);
 
-    //exe.addPackagePath("flecs", "zig-flecs/src/flecs.zig");
-    // const flecs_build = @import("zig-flecs/build.zig");
-    // flecs_build.linkArtifact2(b, exe, target, flecs_build.LibType.static, "zig-flecs/");
-
-    // exe.addPackagePath("ecs", "zig-ecs/src/ecs.zig");
-    const ecs_build = @import("zig-ecs/build.zig");
-    ecs_build.linkArtifact(b, exe, target, ecs_build.LibType.static, "zig-ecs/src/");
+    exe.addPackagePath("ecs", "zig-ecs/src/ecs.zig");
 
     const run_cmd = exe.run();
     const run_step = b.step("run", "run SnakeRayLib");
