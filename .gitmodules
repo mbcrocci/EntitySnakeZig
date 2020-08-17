@@ -1,0 +1,6 @@
+[submodule "raylib-zig"]
+	path = raylib-zig
+	url = https://github.com/Not-Nik/raylib-zig
+[submodule "zig-ecs"]
+	path = zig-ecs
+	url = https://github.com/schroffl/zig-ecs
