@@ -236,14 +236,57 @@ fn inputSystem(reg: *ecs.Registry) void {
     // 2. Restart game
 }
 
-fn moveSystem(reg: *ecs.Registry, dt: f64) void {
-    var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{});
-
+fn directionSystem(reg: *ecs.Registry) void {
     var queue = reg.singletons.get(MoveQueue);
-
     var previous_direction: ?Direction = null;
     var current_direction: ?Direction = null;
     var queued_direction: ?Direction = queue.pop();
+
+    var group = reg.group(.{ SnakePart, Position, Direction }, .{}, .{});
+
+    const SortCtx = struct {
+        fn sort(this: void, a: SnakePart, b: SnakePart) bool {
+            if (a == .head) {
+                return true;
+            } else if (b == .head) {
+                return false;
+            }
+
+            if (a == .tail) {
+                return false;
+            } else if (b == .tail) {
+                return true;
+            }
+
+            return false;
+        }
+    };
+
+    group.sort(SnakePart, {}, SortCtx.sort);
+
+    var iter = group.iterator(struct { part: *SnakePart, position: *Position, direction: *Direction });
+    while (iter.next()) |entity| {
+        current_direction = entity.direction.*;
+
+        if (previous_direction) |new_direction| {
+            entity.direction.* = new_direction;
+        } else {
+            if (queued_direction) |next_direction| {
+                if (entity.part.* == .head) {
+                    const dir_change = directionCanChange(entity.direction.*, next_direction);
+                    if (dir_change) {
+                        entity.direction.* = next_direction;
+                    }
+                }
+            }
+        }
+
+        previous_direction = current_direction;
+    }
+}
+
+fn moveSystem(reg: *ecs.Registry, dt: f64) void {
+    var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{});
 
     var iter = view.iterator();
     while (iter.next()) |entity| {
@@ -251,25 +294,6 @@ fn moveSystem(reg: *ecs.Registry, dt: f64) void {
         var position = view.get(Position, entity);
         var direction: *Direction = view.get(Direction, entity);
         const velocity = view.getConst(Velocity, entity);
-
-        if (entType == .snakeBit) {
-            current_direction = direction.*;
-
-            if (previous_direction) |new_direction| {
-                direction.* = new_direction;
-            } else {
-                if (queued_direction) |next_direction| {
-                    if (reg.get(SnakePart, entity).* == .head) {
-                        const dir_change = directionCanChange(direction.*, next_direction);
-                        if (dir_change) {
-                            direction.* = next_direction;
-                        }
-                    }
-                }
-            }
-
-            previous_direction = current_direction;
-        }
 
         switch (direction.*) {
             .right => position.fx = position.fx + velocity.vx * dt,
@@ -400,12 +424,7 @@ fn spawnSnakeTail(reg: *ecs.Registry) void {
             tailDir = dir;
 
             part.* = SnakePart.body;
-            // reg.remove(SnakePart, entity);
-            // reg.add(entity, SnakePart.body);
-
             ani.* = sprites.body;
-            // reg.remove(sprites.Animation, entity);
-            // reg.add(entity, sprites.body);
             break;
         }
     }
@@ -475,7 +494,7 @@ fn spawningSystem(reg: *ecs.Registry) void {
 
         switch (entType.*) {
             .snakeBit => {
-                //spawnSnakeTail(reg);
+                spawnSnakeTail(reg);
             },
             .food => {
                 spawnFood(reg);
@@ -538,6 +557,8 @@ pub fn main() anyerror!void {
             const dt = delta_time * 0.001;
 
             inputSystem(&reg);
+
+            directionSystem(&reg);
             moveSystem(&reg, dt);
 
             collisionSystem(&reg);
