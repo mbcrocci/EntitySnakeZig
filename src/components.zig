@@ -61,6 +61,10 @@ pub const Spawnable = struct {
     entType: EntityType,
 };
 
+pub const CollisionType = enum {
+    snakeSelf, snakeFood, shotSnake, shotFood
+};
+
 // Singleton Components
 
 pub const Score = struct {

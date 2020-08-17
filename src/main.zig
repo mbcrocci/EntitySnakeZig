@@ -14,43 +14,14 @@ const Shot = @import("shot.zig").Shot;
 const pu = @import("powerup.zig");
 const cs = @import("collision.zig");
 
-const flecs = @import("flecs");
+// const flecs = @import("flecs");
+const ecs = @import("ecs");
 
 const grid_size_x: i64 = 30;
 const grid_size_y: i64 = 20;
 pub const grid_cell_size: i64 = 32;
 const screen_size_x: i64 = grid_size_x * grid_cell_size;
 const screen_size_y: i64 = grid_size_y * grid_cell_size;
-
-fn maybeCreateFood(rng: *std.rand.Random, food: *ArrayList(Food)) !void {
-    if (food.items.len > 0) {
-        return;
-    }
-
-    var x = rng.intRangeAtMost(i64, 0, grid_size_x - 1);
-    var y = rng.intRangeAtMost(i64, 0, grid_size_y - 1);
-
-    var ppt: ?pu.PowerUpTag = null;
-    var prob = rng.float(f32);
-    if (prob < 0.1) {
-        ppt = .Invulnerable;
-    } else if (prob < 0.2) {
-        ppt = .Gun;
-    } else if (prob < 0.3) {
-        ppt = .ScoreMultiplier;
-    }
-
-    try food.append(Food{
-        .entity = Entity.new(
-            .{
-                .x = x,
-                .y = y,
-            },
-            .down,
-        ),
-        .power_up = ppt,
-    });
-}
 
 fn renderBackground() void {
     var x: i64 = 0;
@@ -93,51 +64,16 @@ fn isOutsideScreen(position: *Position) bool {
 
 var is_debug: bool = false;
 
-fn getRng(world: *flecs.ecs_world_t) callconv(.C) *Rng {
-    var query = flecs.ecs_query_new(world, "Rng");
-    var query_it = flecs.ecs_query_iter(query);
-    _ = flecs.ecs_query_next(&query_it);
+fn getSnakeHeadPosition(reg: *ecs.Registry) ?*Position {
+    var view = reg.view(.{ SnakePart, Position }, .{});
 
-    return &query_it.column(Rng, 1)[0];
-}
+    var iter = view.iterator();
+    while (iter.next()) |entity| {
+        const part = view.getConst(SnakePart, entity);
+        var pos = view.get(Position, entity);
 
-fn getIsAlive(world: *flecs.ecs_world_t) callconv(.C) *IsAlive {
-    var query = flecs.ecs_query_new(world, "IsAlive");
-    var query_it = flecs.ecs_query_iter(query);
-    _ = flecs.ecs_query_next(&query_it);
-
-    return &query_it.column(IsAlive, 1)[0];
-}
-
-fn getMoveQueue(world: *flecs.ecs_world_t) callconv(.C) *MoveQueue {
-    var query = flecs.ecs_query_new(world, "[out] MoveQueue");
-    var query_it = flecs.ecs_query_iter(query);
-    _ = flecs.ecs_query_next(&query_it);
-    return &query_it.column(MoveQueue, 1)[0];
-}
-
-fn getScore(world: *flecs.ecs_world_t) callconv(.C) *Score {
-    var query = flecs.ecs_query_new(world, "Score");
-    var query_it = flecs.ecs_query_iter(query);
-    _ = flecs.ecs_query_next(&query_it);
-
-    return &query_it.column(Score, 1)[0];
-}
-
-fn getSnakeHeadPosition(world: *flecs.ecs_world_t) callconv(.C) ?*Position {
-    // return flecs.ecs_lookup(world, "SnakeHead");
-    var query = flecs.ecs_query_new(world, "[in] SnakePart, Position");
-    var query_it = flecs.ecs_query_iter(query);
-
-    _ = flecs.ecs_query_next(&query_it);
-
-    var parts = query_it.column(SnakePart, 1);
-    var positions = query_it.column(Position, 2);
-
-    var i: usize = 0;
-    while (i < query_it.count) : (i += 1) {
-        if (parts[i] == SnakePart.head) {
-            return &positions[i];
+        if (part == SnakePart.head) {
+            return pos;
         }
     }
 
@@ -165,7 +101,39 @@ fn rectangleFromPosition(t: EntityType, pos: Position) Rectangle {
     };
 }
 
-fn renderPowerups(world: *flecs.ecs_world_t) callconv(.C) void {
+fn truePositionRect(t: EntityType, pos: Position) Rectangle {
+    const fgrid = @intToFloat(f64, grid_cell_size);
+    return switch (t) {
+        .shot => .{
+            .x = @floatCast(f32, pos.fx * fgrid + (fgrid / 4.0)),
+            .y = @floatCast(f32, pos.fy * fgrid + (fgrid / 4.0)),
+            .width = @floatCast(f32, fgrid / 2.0),
+            .height = @floatCast(f32, fgrid / 2.0),
+        },
+        else => .{
+            .x = @floatCast(f32, pos.fx * fgrid),
+            .y = @floatCast(f32, pos.fy * fgrid),
+            .width = @floatCast(f32, fgrid),
+            .height = @floatCast(f32, fgrid),
+        },
+    };
+}
+
+fn rectanglesIntersect(r1: Rectangle, r2: Rectangle) bool {
+
+
+    return r1.x < r2.width and
+        r1.width > r2.x and
+        r1.y > r2.y and
+        r1.height < r2.y;
+
+    // return r1.x < r2.x + r2.width and
+    //     r1.x + r1.width > r2.x and
+    //     r1.y > r2.y + r2.height and
+    //     r1.y + r1.height < r2.y;
+}
+
+fn renderPowerups(reg: *ecs.Registry) void {
     var query = flecs.ecs_query_new(world, "TimedPowerUp");
     var query_it = flecs.ecs_query_iter(query);
 
@@ -196,10 +164,8 @@ fn renderPowerups(world: *flecs.ecs_world_t) callconv(.C) void {
     }
 }
 
-fn renderSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    const entTypes = it.column(EntityType, 1);
-    const positions = it.column(Position, 2);
-    const animations = it.column(sprites.Animation, 3);
+fn renderSystem(reg: *ecs.Registry) void {
+    var view = reg.view(.{ EntityType, Position, sprites.Animation }, .{});
 
     BeginDrawing();
     defer EndDrawing();
@@ -207,7 +173,7 @@ fn renderSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
     ClearBackground(WHITE);
     renderBackground();
 
-    var scoreTxt = FormatText("Score: %02i", getScore(it.world.?).score);
+    var scoreTxt = FormatText("Score: %02i", reg.singletons.get(Score).score);
     const x_pos = (screen_size_x / 2) - 35;
     DrawText(scoreTxt, x_pos, 20, 24, WHITE);
 
@@ -218,22 +184,27 @@ fn renderSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
         var fpsTxt = FormatText("FPS: %02i", fps);
         DrawText(fpsTxt, 20, 20, 24, LIGHTGRAY);
 
-        const frame_time = GetFrameTime();
-        var frameTxt = FormatText("FT: %d ms", frame_time);
-        // DrawText(frameTxt, 20, 45, 24, LIGHTGRAY);
+        var entCount: i64 = 0;
+        var ents = reg.entities();
+        while (ents.next()) |ent| {
+            entCount += 1;
+        }
 
-        const head = getSnakeHeadPosition(it.world.?);
-        // var posTxt = FormatText("Snake head at (%02i, %02i)", head_pos.x, head_pos.y);
-        // DrawText(posTxt, 20, 60, 24, LIGHTGRAY);
+        var countTxt = FormatText("Entities: %i", entCount);
+        DrawText(countTxt, 20, 40, 24, LIGHTGRAY);
     }
 
-    var i: usize = 0;
-    while (i < it.count) : (i += 1) {
-        var rectangle = rectangleFromPosition(entTypes[i], positions[i]);
+    var iter = view.iterator();
+    while (iter.next()) |entity| {
+        const entType = view.getConst(EntityType, entity);
+        const pos = view.getConst(Position, entity);
+        const animation = view.getConst(sprites.Animation, entity);
+
+        const rectangle = rectangleFromPosition(entType, pos);
 
         DrawTexturePro(
-            animations[i].texture.*,
-            animations[i].sourceRect,
+            animation.texture.*,
+            animation.sourceRect,
             rectangle,
             .{
                 .x = 0,
@@ -245,30 +216,32 @@ fn renderSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
     }
 }
 
-fn moveSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    const entTypes = it.column(EntityType, 1);
-    const positions = it.column(Position, 2);
-    const directions = it.column(Direction, 3);
-    const velocities = it.column(Velocity, 4);
+fn moveSystem(reg: *ecs.Registry, dt: f64) void {
+    var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{});
 
-    var queue = getMoveQueue(it.world.?);
+    var queue = reg.singletons.get(MoveQueue);
 
-    var i: usize = 0;
-    while (i < it.count) : (i += 1) {
+    var iter = view.iterator();
+    while (iter.next()) |entity| {
+        const entType = view.getConst(EntityType, entity);
+        var position = view.get(Position, entity);
+        var direction: *Direction = view.get(Direction, entity);
+        const velocity = view.getConst(Velocity, entity);
+
         var previous_direction: ?Direction = null;
         var current_direction: ?Direction = null;
         var queued_direction: ?Direction = queue.pop();
 
-        if (entTypes[i] == .snakeBit or entTypes[i] == .food) {
-            current_direction = directions[i];
+        if (entType == .snakeBit) {
+            current_direction = direction.*;
 
             if (previous_direction) |new_direction| {
-                directions[i] = new_direction;
+                direction.* = new_direction;
             } else {
                 if (queued_direction) |next_direction| {
-                    const dir_change = directionCanChange(directions[i], next_direction);
+                    const dir_change = directionCanChange(direction.*, next_direction);
                     if (dir_change) {
-                        directions[i] = next_direction;
+                        direction.* = next_direction;
                     }
                 }
             }
@@ -276,67 +249,89 @@ fn moveSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
             previous_direction = current_direction;
         }
 
-        var dt = it.delta_time;
-
-        switch (directions[i]) {
-            .right => positions[i].fx = positions[i].fx + velocities[i].vx * dt,
-            .left => positions[i].fx = positions[i].fx - velocities[i].vx * dt,
-            .down => positions[i].fy = positions[i].fy + velocities[i].vy * dt,
-            .up => positions[i].fy = positions[i].fy - velocities[i].vy * dt,
+        switch (direction.*) {
+            .right => position.fx = position.fx + velocity.vx * dt,
+            .left => position.fx = position.fx - velocity.vx * dt,
+            .down => position.fy = position.fy + velocity.vy * dt,
+            .up => position.fy = position.fy - velocity.vy * dt,
         }
 
-        if (positions[i].x != @floatToInt(i64, positions[i].fx)) {
-            positions[i].x = @floatToInt(i64, positions[i].fx);
+        if (position.x != @floatToInt(i64, position.fx)) {
+            position.x = @floatToInt(i64, position.fx);
         }
 
-        if (positions[i].y != @floatToInt(i64, positions[i].fy)) {
-            positions[i].y = @floatToInt(i64, positions[i].fy);
+        if (position.y != @floatToInt(i64, position.fy)) {
+            position.y = @floatToInt(i64, position.fy);
         }
 
-        const wrap = entTypes[i] != .shot;
+        const wrap = entType != .shot;
         if (wrap) {
-            positions[i].x = @mod(positions[i].x, grid_size_x);
-            positions[i].fx = @mod(positions[i].fx, @intToFloat(f64, grid_size_x));
+            position.x = @mod(position.x, grid_size_x);
+            position.fx = @mod(position.fx, @intToFloat(f64, grid_size_x));
 
-            positions[i].y = @mod(positions[i].y, grid_size_y);
-            positions[i].fy = @mod(positions[i].fy, @intToFloat(f64, grid_size_y));
+            position.y = @mod(position.y, grid_size_y);
+            position.fy = @mod(position.fy, @intToFloat(f64, grid_size_y));
         }
+
+        // std.debug.print("{}\n", .{position});
     }
 }
 
-fn collisionSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    const positions = it.column(Position, 1);
-    const entTypes = it.column(EntityType, 2);
+fn collisionSystem(reg: *ecs.Registry) void {
+    var score = reg.singletons.get(Score);
+    var is_alive = reg.singletons.get(IsAlive);
 
-    var world = flecs.World{ .world = it.world.? };
-    var score = getScore(it.world.?);
+    var headPos = Position{ .x = -1, .y = -1, .fx = -1, .fy = -1 };
 
-    const headPosition = getSnakeHeadPosition(it.world.?);
-    if (headPosition) |headPos| {
-        var i: usize = 0;
-        while (i < it.count) : (i += 1) {
-            if (positions[i].x == headPos.x and positions[i].y == headPos.y) {
-                const ent = it.entities[i];
-                world.set(ent, &ToClean{ .clean = true });
+    var snakeView = reg.view(.{ SnakePart, Position }, .{});
+    var snakeIter = snakeView.iterator();
 
-                std.debug.print("Collision!! {}\n", .{ent});
+    while (snakeIter.next()) |snakeEnt| {
+        const part = snakeView.getConst(SnakePart, snakeEnt);
+        const position = snakeView.getConst(Position, snakeEnt);
 
-                if (entTypes[i] == EntityType.food) {
-                    var fent = flecs.ecs_new_w_type(it.world.?, 0);
-                    world.set(fent, &Spawnable{ .entType = EntityType.food });
+        if (part == .head) {
+            headPos = position;
+        }
 
-                    std.debug.print("Spawning new food\n", .{});
+        if (position.x == headPos.x and position.y == headPos.y) {
+            is_alive.is_alive = false;
+        }
+    }
+
+    const hrect = truePositionRect(EntityType.snakeBit, headPos);
+
+    var view = reg.view(.{ Position, EntityType }, .{ SnakePart, ToClean });
+    var iter = view.iterator();
+
+    while (iter.next()) |entity| {
+        const position = view.getConst(Position, entity);
+        const entType = view.getConst(EntityType, entity);
+
+        const prect = truePositionRect(entType, position);
+
+        // if (position.x == headPos.x and
+        //     position.y == headPos.y and
+        //     position.fx == headPos.fx and
+        //     position.fy == headPos.fy)
+        if (rectanglesIntersect(hrect, prect)) {
+            switch (entType) {
+                .food => {
+                    reg.add(entity, ToClean{ .clean = true });
+
+                    var new_food = reg.create();
+                    reg.add(new_food, Spawnable{ .entType = EntityType.food });
+                    reg.add(new_food, EntityType.food);
 
                     score.score += 1;
-                }
+                },
+                else => {},
             }
         }
     }
 }
 
-fn inputSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    var queue = it.column(MoveQueue, 1);
-
+fn inputSystem(reg: *ecs.Registry) void {
     var dir: ?Direction = null;
 
     if (IsKeyDown(KeyboardKey.KEY_RIGHT)) {
@@ -350,7 +345,8 @@ fn inputSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
     }
 
     if (dir) |ndir| {
-        queue[0].append(ndir);
+        var queue = reg.singletons.get(MoveQueue);
+        queue.append(ndir);
     }
 
     if (IsKeyReleased(KeyboardKey.KEY_D)) {
@@ -358,70 +354,68 @@ fn inputSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
     }
 }
 
-fn positionCheckerSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    const positions = it.column(Position, 1);
+fn positionCheckerSystem(reg: *ecs.Registry) void {
+    var view = reg.view(.{Position}, .{});
 
-    var world = flecs.World{ .world = it.world.? };
+    var iter = view.iterator();
+    while (iter.next()) |entity| {
+        const position = view.getConst(Position, entity);
 
-    var i: usize = 0;
-    while (i < it.count) : (i += 1) {
-        if (isOutsideScreen(&positions[i])) {
-            const ent = it.entities[i];
-            world.set(ent, &ToClean{ .clean = true });
+        if (isOutsideScreen(&position)) {
+            reg.add(ToClean{ .clean = true }, entity);
         }
     }
 }
 
-fn cleaningSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    var i: usize = 0;
-    while (i < it.count) : (i += 1) {
-        const ent = it.entities[i];
-        flecs.ecs_delete(it.world.?, ent);
+fn cleaningSystem(reg: *ecs.Registry) void {
+    var view = reg.view(.{ToClean}, .{});
+
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        // std.debug.print("Destroying: {}\n", .{entity});
+        reg.destroy(entity);
     }
 }
 
-fn spawningSystem(it: *flecs.ecs_iter_t) callconv(.C) void {
-    const spawnables = it.column(Spawnable, 1);
+fn maybeCreateFood(reg: *ecs.Registry) void {
+    var rng = reg.singletons.getConst(Rng).rng.random;
 
-    var world = flecs.World{ .world = it.world.? };
+    var x = rng.intRangeAtMost(i64, 0, grid_size_x - 1);
+    var y = rng.intRangeAtMost(i64, 0, grid_size_y - 1);
+    // var fx = @intToFloat(f64, x);
+    // var fy = @intToFloat(f64, y);
 
-    var rng = getRng(it.world.?).rng.random;
+    // var ppt: ?pu.PowerUpTag = null;
+    // var prob = rng.float(f32);
+    // if (prob < 0.1) {
+    //     ppt = .Invulnerable;
+    // } else if (prob < 0.2) {
+    //     ppt = .Gun;
+    // } else if (prob < 0.3) {
+    //     ppt = .ScoreMultiplier;
+    // }
 
-    var i: usize = 0;
-    while (i < it.count) : (i += 1) {
-        var ent = flecs.ecs_new_w_type(it.world.?, 0);
+    var ent = reg.create();
+    reg.add(ent, EntityType.food);
+    // reg.add(ent, Position{ .x = x, .y = y, .fx = fx, .fy = fy });
+    reg.add(ent, Position{ .x = x, .y = y, .fx = 5, .fy = 5 });
+    reg.add(ent, sprites.food);
+}
 
-        std.debug.print("Spawning: {} => {} \n", .{ spawnables[i], ent });
+fn spawningSystem(reg: *ecs.Registry) void {
+    var view = reg.view(.{ Spawnable, EntityType }, .{});
 
-        switch (spawnables[i].entType) {
+    var iter = view.iterator();
+    while (iter.next()) |entity| {
+        var spawnable = view.get(Spawnable, entity);
+        var entType = view.get(EntityType, entity);
+
+        reg.add(entity, ToClean{ .clean = true });
+
+        switch (entType.*) {
             .snakeBit => {},
             .food => {
-                var x = rng.intRangeAtMost(i64, 0, grid_size_x - 1);
-                var y = rng.intRangeAtMost(i64, 0, grid_size_y - 1);
-                var fx = @intToFloat(f64, x);
-                var fy = @intToFloat(f64, y);
-
-                var ppt: ?pu.PowerUpTag = null;
-                var prob = rng.float(f32);
-                if (prob < 0.1) {
-                    ppt = .Invulnerable;
-                } else if (prob < 0.2) {
-                    ppt = .Gun;
-                } else if (prob < 0.3) {
-                    ppt = .ScoreMultiplier;
-                }
-
-                world.set(ent, &EntityType.food);
-                std.debug.print("Set EntityType\n", .{});
-                world.set(ent, &Position{
-                    .x = x,
-                    .y = y,
-                    .fx = fx,
-                    .fy = fy,
-                });
-                std.debug.print("Set Position\n", .{});
-                world.set(ent, &sprites.food);
-                std.debug.print("Set animation\n", .{});
+                maybeCreateFood(reg);
             },
             .shot => {},
         }
@@ -457,84 +451,60 @@ pub fn main() anyerror!void {
     InitWindow(screen_size_x, screen_size_y, "Power Snake");
     sprites.initTexture();
 
-    var world = flecs.World.init();
-    defer world.deinit();
+    var reg = ecs.Registry.init(allocator);
+    defer reg.deinit();
+    {
+        var sigletons = &reg.singletons;
+        sigletons.add(IsAlive{ .is_alive = true });
+        sigletons.add(Score{ .score = 0 });
+        sigletons.add(MoveQueue{ .moves = ArrayList(Direction).init(allocator) });
+        sigletons.add(Rng.init(allocator));
 
-    // Declare components
-    _ = world.newComponent(EntityType);
-    _ = world.newComponent(Position);
-    _ = world.newComponent(Direction);
-    _ = world.newComponent(Velocity);
-    _ = world.newComponent(SnakePart);
-    _ = world.newComponent(sprites.Animation);
+        var head = reg.create();
+        reg.add(head, EntityType.snakeBit);
+        reg.add(head, Direction.right);
+        reg.add(head, Position{ .x = 10, .y = 5, .fx = 10.0, .fy = 5.0 });
+        reg.add(head, Velocity{ .vx = 15, .vy = 15 });
+        reg.add(head, SnakePart.head);
+        reg.add(head, sprites.head);
 
-    _ = world.newComponent(PowerUpTag);
-    _ = world.newComponent(TimedPowerUp);
-    _ = world.newComponent(Spawnable);
-    _ = world.newComponent(ToClean);
+        const f = reg.create();
+        reg.add(f, EntityType.food);
+        reg.add(f, Position{ .x = 25, .y = 10, .fx = 25.0, .fy = 5.0 });
+        reg.add(f, sprites.food);
+    }
 
-    // Singleton Components
-    _ = world.newComponent(IsAlive);
-    _ = world.newComponent(Score);
-    _ = world.newComponent(Rng);
-    _ = world.newComponent(MoveQueue);
+    // SetTargetFPS(75);
+    var delta_time: f64 = 1.0 / 75.0;
 
-    // Init Singleton Entities
-    const is_alive = flecs.ecs_new_w_entity(world.world, 0);
-    world.setName(is_alive, "IsAlive");
-    world.set(is_alive, &IsAlive{ .is_alive = true });
+    var previous = @intToFloat(f64, std.time.milliTimestamp());
+    var lag: f64 = 0.0;
 
-    const scoreEnt = flecs.ecs_new_w_entity(world.world, 0);
-    world.setName(scoreEnt, "Score");
-    world.set(scoreEnt, &Score{ .score = 0 });
-
-    const rng = flecs.ecs_new_w_entity(world.world, 0);
-    world.setName(rng, "Rng");
-    world.set(rng, &Rng.init(allocator));
-
-    const moveQueueEnt = flecs.ecs_new_w_entity(world.world, 0);
-    world.setName(moveQueueEnt, "MoveQueue");
-    world.set(moveQueueEnt, &MoveQueue{
-        .moves = ArrayList(Direction).init(allocator),
-    });
-
-    // Init Systems
-    world.newSystem("Input", .on_update, "[out] MoveQueue", inputSystem);
-
-    world.newSystem("Move", .on_update, "[in] EntityType, [out] Position, [out] Direction, [in] Velocity", moveSystem);
-
-    world.newSystem("Collision", .on_update, "[in] Position, [in] EntityType, [in] !SnakePart", collisionSystem);
-
-    world.newSystem("PositionChecker", .on_update, "[in] Position", positionCheckerSystem);
-    world.newSystem("Clean", .on_update, "[in] ToClean", cleaningSystem);
-
-    world.newSystem("Spawner", .on_update, "[in] Spawnable", spawningSystem);
-
-    world.newSystem("Render", .on_update, "[in] EntityType, [in] Position, [in] Animation", renderSystem);
-
-    const head = flecs.ecs_new_w_type(world.world, 0);
-    world.setName(head, "SnakeHead");
-    world.set(head, &EntityType.snakeBit);
-    world.set(head, &Direction.right);
-    world.set(head, &Position{ .x = 10, .y = 5, .fx = 10.0, .fy = 5.0 });
-    world.set(head, &Velocity{ .vx = 15, .vy = 15 });
-    world.set(head, &SnakePart.head);
-    world.set(head, &sprites.head);
-
-    const f = flecs.ecs_new_w_type(world.world, 0);
-    world.set(f, &EntityType.food);
-    world.set(f, &Position{ .x = 25, .y = 10, .fx = 25.0, .fy = 5.0 });
-    world.set(f, &sprites.food);
-
-    // Only applies for rendering.
-    world.setTargetFps(75);
-    SetTargetFPS(75);
-
-    // Main game loop
     while (!WindowShouldClose()) {
-        if (getIsAlive(world.world).is_alive) {
-            world.progress(0);
+        const current = @intToFloat(f64, std.time.milliTimestamp());
+        const elapsed = current - previous;
+
+        previous = current;
+        lag += elapsed;
+
+        var is_alive = reg.singletons.get(IsAlive).is_alive;
+
+        while (lag >= delta_time) {
+            const dt = delta_time * 0.001;
+
+            inputSystem(&reg);
+            moveSystem(&reg, dt);
+
+            collisionSystem(&reg);
+
+            // positionCheckerSystem(&reg);
+            spawningSystem(&reg);
+
+            cleaningSystem(&reg);
+            lag -= delta_time;
         }
+
+        renderSystem(&reg);
     }
 
     CloseWindow(); // Close window and OpenGL context
