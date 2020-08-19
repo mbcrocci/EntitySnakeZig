@@ -4,18 +4,63 @@ const ArrayList = std.ArrayList;
 
 usingnamespace @import("raylib");
 usingnamespace @import("components.zig");
-usingnamespace @import("entity.zig");
 
 const sprites = @import("sprite.zig");
-const SnakeBit = @import("snake.zig").SnakeBit;
-const Food = @import("food.zig").Food;
-const Shot = @import("shot.zig").Shot;
-
 const pu = @import("powerup.zig");
-const cs = @import("collision.zig");
 
 // const flecs = @import("flecs");
 const ecs = @import("ecs");
+
+const Metrics = struct {
+    avgMoveIter: f64,
+    moveIterations: u64,
+    moveTimes: ArrayList(u64),
+
+    avgCollisionIter: f64,
+    collisionIterations: u64,
+    collisionTimes: ArrayList(u64),
+
+    avgRenderingIter: f64,
+    renderingIterations: u64,
+    renderingTimes: ArrayList(u64),
+
+    fn avg(self: *Metrics) void {
+        var ms: f64 = 0;
+        for (self.moveTimes.items) |mt| {
+            ms += @intToFloat(f64, mt);
+        }
+        self.avgMoveIter = ms / @intToFloat(f64, self.moveIterations);
+
+        var cls: f64 = 0;
+        for (self.collisionTimes.items) |ct| {
+            cls += @intToFloat(f64, ct);
+        }
+        self.avgCollisionIter = cls / @intToFloat(f64, self.collisionIterations);
+
+        var rs: f64 = 0;
+        for (self.moveTimes.items) |rt| {
+            rs += @intToFloat(f64, rt);
+        }
+        self.avgRenderingIter = rs / @intToFloat(f64, self.renderingIterations);
+    }
+};
+
+var metrics = Metrics{
+    .avgMoveIter = 0,
+    .moveIterations = 1,
+
+    .avgCollisionIter = 0,
+    .collisionIterations = 1,
+
+    .avgRenderingIter = 0,
+    .renderingIterations = 1,
+
+    .moveTimes = ArrayList(u64).init(std.heap.c_allocator),
+    .collisionTimes = ArrayList(u64).init(std.heap.c_allocator),
+    .renderingTimes = ArrayList(u64).init(std.heap.c_allocator),
+};
+
+var is_debug: bool = true;
 
 const grid_size_x: i64 = 30;
 const grid_size_y: i64 = 20;
@@ -37,8 +82,6 @@ fn isOutsideScreen(position: *const Position) bool {
         position.y < 0 or
         position.y > grid_size_y;
 }
-
-var is_debug: bool = false;
 
 fn getSnakeHeadPosition(reg: *ecs.Registry) ?*Position {
     var view = reg.view(.{ SnakePart, Position }, .{});
@@ -158,10 +201,12 @@ fn renderPowerups(reg: *ecs.Registry) void {
 }
 
 fn renderSystem(reg: *ecs.Registry) void {
+    var timer = std.time.Timer.start() catch unreachable;
+
     var view = reg.view(.{ EntityType, Position, sprites.Animation }, .{});
 
     BeginDrawing();
-    defer EndDrawing();
+    //defer EndDrawing();
 
     ClearBackground(WHITE);
     renderBackground();
@@ -185,6 +230,26 @@ fn renderSystem(reg: *ecs.Registry) void {
 
         var countTxt = FormatText("Entities: %i", entCount);
         DrawText(countTxt, 20, 40, 24, LIGHTGRAY);
+
+        if (reg.singletons.get(MoveQueue).peek()) |nextDir| {
+            var txt = switch (nextDir) {
+                .right => FormatText("Last dir: right"),
+                .left => FormatText("Last dir: left"),
+                .down => FormatText("Last dir: down"),
+                .up => FormatText("Last dir: up"),
+            };
+
+            DrawText(txt, 20, 60, 24, LIGHTGRAY);
+        }
+
+        var moveMetricTxt = FormatText("Move: %2.02f ms", metrics.avgMoveIter / 1000000);
+        DrawText(moveMetricTxt, 20, 80, 24, LIGHTGRAY);
+
+        // var collisionMetricTxt = FormatText("Coll: %2.02f ms", metrics.avgCollisionIter / 1000000);
+        // DrawText(collisionMetricTxt, 20, 100, 24, LIGHTGRAY);
+
+        var renderingMetricTxt = FormatText("Rend: %2.02f ms", metrics.avgRenderingIter / 1000000);
+        DrawText(renderingMetricTxt, 20, 100, 24, LIGHTGRAY);
     }
 
     var iter = view.iterator();
@@ -193,12 +258,12 @@ fn renderSystem(reg: *ecs.Registry) void {
         const pos = view.getConst(Position, entity);
         const animation = view.getConst(sprites.Animation, entity);
 
-        const rectangle = rectangleFromPosition(entType, pos);
+        const r = rectangleFromPosition(entType, pos);
 
         DrawTexturePro(
             animation.texture.*,
             animation.sourceRect,
-            rectangle,
+            r,
             .{
                 .x = 0,
                 .y = 0,
@@ -206,7 +271,27 @@ fn renderSystem(reg: *ecs.Registry) void {
             0,
             WHITE,
         );
+
+        if (is_debug) {
+            DrawRectangleLinesEx(r, 2, WHITE);
+
+            if (reg.tryGet(Direction, entity)) |direction| {
+                const debug_line: Vector2 = switch (direction.*) {
+                    .right => .{ .x = r.x + 100, .y = r.y + 16 },
+                    .left => .{ .x = r.x + 16, .y = r.y + 100 },
+                    .down => .{ .x = r.x - 100, .y = r.y + 16 },
+                    .up => .{ .x = r.x + 16, .y = r.y - 100 },
+                };
+                DrawLineEx(.{ .x = r.x + 16, .y = r.y + 16 }, debug_line, 2, WHITE);
+            }
+        }
     }
+    EndDrawing();
+
+    var end = timer.lap();
+
+    metrics.renderingIterations += 1;
+    metrics.renderingTimes.append(end) catch unreachable;
 }
 
 fn inputSystem(reg: *ecs.Registry) void {
@@ -236,12 +321,7 @@ fn inputSystem(reg: *ecs.Registry) void {
     // 2. Restart game
 }
 
-fn directionSystem(reg: *ecs.Registry) void {
-    var queue = reg.singletons.get(MoveQueue);
-    var previous_direction: ?Direction = null;
-    var current_direction: ?Direction = null;
-    var queued_direction: ?Direction = queue.pop();
-
+fn getSnakeGroup(reg: *ecs.Registry) ecs.OwningGroup {
     var group = reg.group(.{ SnakePart, Position, Direction }, .{}, .{});
 
     const SortCtx = struct {
@@ -263,20 +343,36 @@ fn directionSystem(reg: *ecs.Registry) void {
     };
 
     group.sort(SnakePart, {}, SortCtx.sort);
+    return group;
+}
+
+fn directionSystem(reg: *ecs.Registry) void {
+    var queue = reg.singletons.get(MoveQueue);
+    var previous_direction: ?Direction = null;
+    var current_direction: ?Direction = null;
+    var queued_direction: ?Direction = queue.pop();
+
+    var group = getSnakeGroup(reg);
 
     var iter = group.iterator(struct { part: *SnakePart, position: *Position, direction: *Direction });
     while (iter.next()) |entity| {
+        if (is_debug) {
+            if (@mod(std.time.milliTimestamp(), @intCast(i64, 77)) == 0) {
+                if (queued_direction) |q| {
+                    std.debug.print("prev: {}\ncurrent: {}\nqueued: {}\n\n", .{ previous_direction, current_direction, q });
+                }
+            }
+        }
+
         current_direction = entity.direction.*;
 
         if (previous_direction) |new_direction| {
             entity.direction.* = new_direction;
         } else {
             if (queued_direction) |next_direction| {
-                if (entity.part.* == .head) {
-                    const dir_change = directionCanChange(entity.direction.*, next_direction);
-                    if (dir_change) {
-                        entity.direction.* = next_direction;
-                    }
+                const dir_change = directionCanChange(entity.direction.*, next_direction);
+                if (dir_change) {
+                    entity.direction.* = next_direction;
                 }
             }
         }
@@ -286,14 +382,42 @@ fn directionSystem(reg: *ecs.Registry) void {
 }
 
 fn moveSystem(reg: *ecs.Registry, dt: f64) void {
+    var timer = std.time.Timer.start() catch unreachable;
+
     var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{});
+
+    var queue = reg.singletons.get(MoveQueue);
+    var previous_direction: ?Direction = null;
+    var current_direction: ?Direction = null;
+    var queued_direction: ?Direction = null;
 
     var iter = view.iterator();
     while (iter.next()) |entity| {
         const entType = view.getConst(EntityType, entity);
         var position = view.get(Position, entity);
-        var direction: *Direction = view.get(Direction, entity);
+        var direction = view.get(Direction, entity);
         const velocity = view.getConst(Velocity, entity);
+
+        if (entType == .snakeBit and (position.x != @floatToInt(i64, position.fx) or position.y != @floatToInt(i64, position.fy))) {
+            if (reg.get(SnakePart, entity).* == .head) {
+                queued_direction = queue.pop();
+            }
+
+            current_direction = direction.*;
+
+            if (previous_direction) |new_direction| {
+                direction.* = new_direction;
+            } else {
+                if (queued_direction) |next_direction| {
+                    const dir_change = directionCanChange(direction.*, next_direction);
+                    if (dir_change) {
+                        direction.* = next_direction;
+                    }
+                }
+            }
+
+            previous_direction = current_direction;
+        }
 
         switch (direction.*) {
             .right => position.fx = position.fx + velocity.vx * dt,
@@ -321,9 +445,15 @@ fn moveSystem(reg: *ecs.Registry, dt: f64) void {
 
         // std.debug.print("{}\n", .{position});
     }
+    var end = timer.lap();
+
+    metrics.moveIterations += 1;
+    metrics.moveTimes.append(end) catch unreachable;
 }
 
 fn collisionSystem(reg: *ecs.Registry) void {
+    var timer = std.time.Timer.start() catch unreachable;
+
     var score = reg.singletons.get(Score);
     var is_alive = reg.singletons.get(IsAlive);
 
@@ -378,6 +508,10 @@ fn collisionSystem(reg: *ecs.Registry) void {
             }
         }
     }
+    var end = timer.lap();
+
+    metrics.collisionIterations += 1;
+    metrics.collisionTimes.append(end) catch unreachable;
 }
 
 fn positionCheckerSystem(reg: *ecs.Registry) void {
@@ -521,7 +655,7 @@ pub fn main() anyerror!void {
         var sigletons = &reg.singletons;
         sigletons.add(IsAlive{ .is_alive = true });
         sigletons.add(Score{ .score = 0 });
-        sigletons.add(MoveQueue{ .moves = ArrayList(Direction).init(allocator) });
+        sigletons.add(MoveQueue.init(allocator));
         sigletons.add(Rng.init(allocator));
 
         var head = reg.create();
@@ -538,8 +672,9 @@ pub fn main() anyerror!void {
         reg.add(f, sprites.food);
     }
 
-    // SetTargetFPS(75);
-    var delta_time: f64 = 1.0 / 75.0;
+    const fps = 75.0;
+    // SetTargetFPS(fps);
+    var delta_time: f64 = (1.0 / fps) * 1000.0;
 
     var previous = @intToFloat(f64, std.time.milliTimestamp());
     var lag: f64 = 0.0;
@@ -558,7 +693,6 @@ pub fn main() anyerror!void {
 
             inputSystem(&reg);
 
-            directionSystem(&reg);
             moveSystem(&reg, dt);
 
             collisionSystem(&reg);
@@ -571,6 +705,8 @@ pub fn main() anyerror!void {
         }
 
         renderSystem(&reg);
+
+        metrics.avg();
     }
 
     CloseWindow(); // Close window and OpenGL context
