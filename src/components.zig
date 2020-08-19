@@ -77,6 +77,14 @@ pub const IsAlive = struct {
 
 pub const MoveQueue = struct {
     moves: ArrayList(Direction),
+    lastMove: ?Direction,
+
+    pub fn init(allocator: *Allocator) MoveQueue {
+        return MoveQueue{
+            .moves = ArrayList(Direction).init(allocator),
+            .lastMove = null,
+        };
+    }
 
     pub fn append(self: *MoveQueue, dir: Direction) void {
         self.moves.append(dir) catch |err| {
@@ -85,7 +93,17 @@ pub const MoveQueue = struct {
     }
 
     pub fn pop(self: *MoveQueue) ?Direction {
-        return self.moves.popOrNull();
+        var dir = self.moves.popOrNull();
+
+        if (dir) |d| {
+            self.lastMove = dir;
+        }
+
+        return dir;
+    }
+
+    pub fn peek(self: *MoveQueue) ?Direction {
+        return self.lastMove;
     }
 };
 
