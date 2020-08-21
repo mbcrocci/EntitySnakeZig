@@ -29,6 +29,10 @@ pub const SnakePart = enum {
     head, body, tail
 };
 
+pub const SnakeIndex = struct {
+    index: c_int,
+};
+
 pub const ToClean = struct {
     clean: bool
 };

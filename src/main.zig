@@ -43,24 +43,29 @@ const Metrics = struct {
         }
         self.avgRenderingIter = rs / @intToFloat(f64, self.renderingIterations);
     }
+
+    fn init() Metrics {
+        return Metrics{
+            .avgMoveIter = 0,
+            .moveIterations = 1,
+
+            .avgCollisionIter = 0,
+            .collisionIterations = 1,
+
+            .avgRenderingIter = 0,
+            .renderingIterations = 1,
+
+            .moveTimes = ArrayList(u64).init(std.heap.c_allocator),
+            .collisionTimes = ArrayList(u64).init(std.heap.c_allocator),
+            .renderingTimes = ArrayList(u64).init(std.heap.c_allocator),
+        };
+    }
 };
 
-var metrics = Metrics{
-    .avgMoveIter = 0,
-    .moveIterations = 1,
-
-    .avgCollisionIter = 0,
-    .collisionIterations = 1,
-
-    .avgRenderingIter = 0,
-    .renderingIterations = 1,
-
-    .moveTimes = ArrayList(u64).init(std.heap.c_allocator),
-    .collisionTimes = ArrayList(u64).init(std.heap.c_allocator),
-    .renderingTimes = ArrayList(u64).init(std.heap.c_allocator),
-};
+var metrics = Metrics.init();
 
 var is_debug: bool = true;
+var snakeIndex: c_int = 1;
 
 const grid_size_x: i64 = 30;
 const grid_size_y: i64 = 20;
@@ -81,6 +86,11 @@ fn isOutsideScreen(position: *const Position) bool {
         position.x > grid_size_x or
         position.y < 0 or
         position.y > grid_size_y;
+}
+
+fn getRng() std.rand.Random {
+    //var rng = reg.singletons.getConst(Rng).rng.random;
+    return std.rand.Xoroshiro128.init(@intCast(u64, std.time.milliTimestamp())).random;
 }
 
 fn getSnakeHeadPosition(reg: *ecs.Registry) ?*Position {
@@ -202,6 +212,14 @@ fn renderPowerups(reg: *ecs.Registry) void {
 
 fn renderSystem(reg: *ecs.Registry) void {
     var timer = std.time.Timer.start() catch unreachable;
+    defer {
+        EndDrawing();
+
+        var end = timer.lap();
+
+        metrics.renderingIterations += 1;
+        metrics.renderingTimes.append(end) catch unreachable;
+    }
 
     var view = reg.view(.{ EntityType, Position, sprites.Animation }, .{});
 
@@ -273,25 +291,41 @@ fn renderSystem(reg: *ecs.Registry) void {
         );
 
         if (is_debug) {
-            DrawRectangleLinesEx(r, 2, WHITE);
+            if (entType == .snakeBit) {
+                if (reg.tryGet(SnakePart, entity)) |part| {
+                    switch (part.*) {
+                        .head => DrawRectangleLinesEx(r, 2, WHITE),
+                        .body => DrawRectangleLinesEx(r, 2, YELLOW),
+                        .tail => DrawRectangleLinesEx(r, 2, RED),
+                    }
+                }
+                // if (reg.tryGet(SnakeIndex, entity)) |index| {
+                //     var t = FormatText("%1i", index.*);
+                //     DrawText(t, @floatToInt(i32, r.x + r.width / 2), @floatToInt(i32, r.y + r.height / 2), 24, YELLOW);
+                // }
+            } else {
+                DrawRectangleLinesEx(r, 2, WHITE);
+            }
+
+            // var t = FormatText("(%2i, %2i)", pos.x, pos.y);
+            // DrawText(t, @floatToInt(i32, r.x + r.width / 2), @floatToInt(i32, r.y + r.height / 2), 24, YELLOW);
 
             if (reg.tryGet(Direction, entity)) |direction| {
-                const debug_line: Vector2 = switch (direction.*) {
+                var debug_line: Vector2 = switch (direction.*) {
                     .right => .{ .x = r.x + 100, .y = r.y + 16 },
-                    .left => .{ .x = r.x + 16, .y = r.y + 100 },
-                    .down => .{ .x = r.x - 100, .y = r.y + 16 },
+                    .left => .{ .x = r.x - 100, .y = r.y + 16 },
+                    .down => .{ .x = r.x + 16, .y = r.y + 100 },
                     .up => .{ .x = r.x + 16, .y = r.y - 100 },
                 };
+                // if (reg.tryGet(SnakeIndex, entity)) |index| {
+                //     debug_line.x += @intToFloat(f32, index.*.index * 10);
+                //     // debug_line.y += @intToFloat(f32, index.*.index * 10);
+                // }
+
                 DrawLineEx(.{ .x = r.x + 16, .y = r.y + 16 }, debug_line, 2, WHITE);
             }
         }
     }
-    EndDrawing();
-
-    var end = timer.lap();
-
-    metrics.renderingIterations += 1;
-    metrics.renderingTimes.append(end) catch unreachable;
 }
 
 fn inputSystem(reg: *ecs.Registry) void {
@@ -322,109 +356,137 @@ fn inputSystem(reg: *ecs.Registry) void {
 }
 
 fn getSnakeGroup(reg: *ecs.Registry) ecs.OwningGroup {
-    var group = reg.group(.{ SnakePart, Position, Direction }, .{}, .{});
+    var group = reg.group(.{ SnakePart, Position, Direction, Velocity, sprites.Animation }, .{}, .{});
 
     const SortCtx = struct {
         fn sort(this: void, a: SnakePart, b: SnakePart) bool {
-            if (a == .head) {
-                return true;
-            } else if (b == .head) {
-                return false;
+            switch (a) {
+                .head => {
+                    return false;
+                },
+                .body => {
+                    switch (b) {
+                        .head => {
+                            return true;
+                        },
+                        .body => {
+                            return true;
+                        },
+                        .tail => {
+                            return false;
+                        },
+                    }
+                },
+                .tail => {
+                    return true;
+                },
             }
-
-            if (a == .tail) {
-                return false;
-            } else if (b == .tail) {
-                return true;
-            }
-
-            return false;
         }
     };
 
-    group.sort(SnakePart, {}, SortCtx.sort);
+    const SortCtx2 = struct {
+        fn sort(this: void, a: SnakeIndex, b: SnakeIndex) bool {
+            return a.index > b.index;
+        }
+    };
+
+    // group.sort(SnakePart, {}, SortCtx.sort);
+    group.sort(SnakeIndex, {}, SortCtx2.sort);
+
+    // var iter = group.iterator(struct { part: *SnakePart });
+    // while(iter.next()) |e| { std.debug.print("{}|",.{e.part}); }
+    // std.debug.print("\n", .{});
+
     return group;
 }
 
-fn directionSystem(reg: *ecs.Registry) void {
-    var queue = reg.singletons.get(MoveQueue);
-    var previous_direction: ?Direction = null;
-    var current_direction: ?Direction = null;
-    var queued_direction: ?Direction = queue.pop();
+fn snakeMovementSystem(reg: *ecs.Registry, dt: f64) void {
+    var next_position: ?Position = null;
+    var next_direction: ?Direction = null;
 
+    var queue = reg.singletons.get(MoveQueue);
     var group = getSnakeGroup(reg);
 
-    var iter = group.iterator(struct { part: *SnakePart, position: *Position, direction: *Direction });
-    while (iter.next()) |entity| {
-        if (is_debug) {
-            if (@mod(std.time.milliTimestamp(), @intCast(i64, 77)) == 0) {
-                if (queued_direction) |q| {
-                    std.debug.print("prev: {}\ncurrent: {}\nqueued: {}\n\n", .{ previous_direction, current_direction, q });
-                }
-            }
-        }
+    var giter = group.iterator(struct {
+        part: *SnakePart,
+        position: *Position,
+        direction: *Direction,
+        velocity: *Velocity,
+    });
 
-        current_direction = entity.direction.*;
+    while (giter.next()) |e| {
+        if (e.part.* == .head) {
+            next_position = e.position.*;
+            next_direction = e.direction.*;
 
-        if (previous_direction) |new_direction| {
-            entity.direction.* = new_direction;
-        } else {
-            if (queued_direction) |next_direction| {
-                const dir_change = directionCanChange(entity.direction.*, next_direction);
+            const queued_direction = queue.pop();
+            if (queued_direction) |dir| {
+                const dir_change = directionCanChange(e.direction.*, dir);
                 if (dir_change) {
-                    entity.direction.* = next_direction;
+                    e.direction.* = dir;
                 }
             }
+
+            switch (e.direction.*) {
+                .right => e.position.fx = e.position.fx + e.velocity.vx * dt,
+                .left => e.position.fx = e.position.fx - e.velocity.vx * dt,
+                .down => e.position.fy = e.position.fy + e.velocity.vy * dt,
+                .up => e.position.fy = e.position.fy - e.velocity.vy * dt,
+            }
+        } else if (e.part.* == .tail) {
+            if (next_position) |np| {
+                if (next_direction) |nd| {
+                    e.position.* = np;
+                    e.direction.* = nd;
+                }
+            }
+        } else {
+            const tmp_position = e.position.*;
+            const tmp_direction = e.direction.*;
+
+            if (next_position) |np| {
+                if (next_direction) |nd| {
+                    e.position.* = np;
+                    e.direction.* = nd;
+                }
+            }
+
+            next_position = tmp_position;
+            next_direction = tmp_direction;
         }
 
-        previous_direction = current_direction;
+        if (e.position.x != @floatToInt(i64, e.position.fx)) {
+            e.position.x = @floatToInt(i64, e.position.fx);
+        }
+
+        if (e.position.y != @floatToInt(i64, e.position.fy)) {
+            e.position.y = @floatToInt(i64, e.position.fy);
+        }
+
+        e.position.x = @mod(e.position.x, grid_size_x);
+        e.position.fx = @mod(e.position.fx, @intToFloat(f64, grid_size_x));
+
+        e.position.y = @mod(e.position.y, grid_size_y);
+        e.position.fy = @mod(e.position.fy, @intToFloat(f64, grid_size_y));
     }
 }
 
 fn moveSystem(reg: *ecs.Registry, dt: f64) void {
     var timer = std.time.Timer.start() catch unreachable;
 
-    var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{});
+    snakeMovementSystem(reg, dt);
 
-    var queue = reg.singletons.get(MoveQueue);
-    var previous_direction: ?Direction = null;
-    var current_direction: ?Direction = null;
-    var queued_direction: ?Direction = null;
-
+    var view = reg.view(.{ EntityType, Position, Direction, Velocity }, .{SnakePart});
     var iter = view.iterator();
+
     while (iter.next()) |entity| {
         const entType = view.getConst(EntityType, entity);
         var position = view.get(Position, entity);
         var direction = view.get(Direction, entity);
         const velocity = view.getConst(Velocity, entity);
 
-        if (entType == .snakeBit and (position.x != @floatToInt(i64, position.fx) or position.y != @floatToInt(i64, position.fy))) {
-            if (reg.get(SnakePart, entity).* == .head) {
-                queued_direction = queue.pop();
-            }
-
-            current_direction = direction.*;
-
-            if (previous_direction) |new_direction| {
-                direction.* = new_direction;
-            } else {
-                if (queued_direction) |next_direction| {
-                    const dir_change = directionCanChange(direction.*, next_direction);
-                    if (dir_change) {
-                        direction.* = next_direction;
-                    }
-                }
-            }
-
-            previous_direction = current_direction;
-        }
-
-        switch (direction.*) {
-            .right => position.fx = position.fx + velocity.vx * dt,
-            .left => position.fx = position.fx - velocity.vx * dt,
-            .down => position.fy = position.fy + velocity.vy * dt,
-            .up => position.fy = position.fy - velocity.vy * dt,
-        }
+        position.fx = position.fx + velocity.vx * dt;
+        position.fy = position.fy + velocity.vy * dt;
 
         if (position.x != @floatToInt(i64, position.fx)) {
             position.x = @floatToInt(i64, position.fx);
@@ -433,17 +495,6 @@ fn moveSystem(reg: *ecs.Registry, dt: f64) void {
         if (position.y != @floatToInt(i64, position.fy)) {
             position.y = @floatToInt(i64, position.fy);
         }
-
-        const wrap = entType != .shot;
-        if (wrap) {
-            position.x = @mod(position.x, grid_size_x);
-            position.fx = @mod(position.fx, @intToFloat(f64, grid_size_x));
-
-            position.y = @mod(position.y, grid_size_y);
-            position.fy = @mod(position.fy, @intToFloat(f64, grid_size_y));
-        }
-
-        // std.debug.print("{}\n", .{position});
     }
     var end = timer.lap();
 
@@ -539,62 +590,59 @@ fn cleaningSystem(reg: *ecs.Registry) void {
 }
 
 fn spawnSnakeTail(reg: *ecs.Registry) void {
-    var view = reg.view(.{ SnakePart, Position, Direction, sprites.Animation }, .{});
-    var iter = view.iterator();
+    var group = getSnakeGroup(reg);
+    var giter = group.iterator(struct {
+        part: *SnakePart,
+        position: *Position,
+        direction: *Direction,
+        animation: *sprites.Animation,
+    });
 
-    // In case ther is only the head, stores it.
-    var tailEnt = iter.next() orelse 0;
-    var tailPos = view.get(Position, tailEnt).*;
-    var tailDir = view.get(Direction, tailEnt);
+    var tailPos: ?Position = null;
+    var tailDir: ?Direction = null;
 
-    while (iter.next()) |entity| {
-        var pos = view.get(Position, entity);
-        var part = view.get(SnakePart, entity);
-        var dir = view.get(Direction, entity);
-        var ani = view.get(sprites.Animation, entity);
+    while (giter.next()) |entity| {
+        tailPos = entity.position.*;
+        tailDir = entity.direction.*;
 
-        if (part.* == SnakePart.tail) {
-            tailPos = pos.*;
-            tailDir = dir;
-
-            part.* = SnakePart.body;
-            ani.* = sprites.body;
-            break;
+        if (entity.part.* == .tail) {
+            entity.part.* = .body;
+            entity.animation.* = sprites.body;
         }
     }
 
-    switch (tailDir.*) {
-        .right => {
-            tailPos.x -= 1;
-            tailPos.fx -= 1;
-        },
-        .left => {
-            tailPos.x += 1;
-            tailPos.fx += 1;
-        },
-        .down => {
-            tailPos.y -= 1;
-            tailPos.fy -= 1;
-        },
-        .up => {
-            tailPos.y += 1;
-            tailPos.fy += 1;
-        },
-    }
+    if (tailPos) |tp| {
+        if (tailDir) |td| {
+            var tailp = tp;
+            var taild = td;
 
-    var new_bit = reg.create();
-    reg.add(new_bit, EntityType.snakeBit);
-    reg.add(new_bit, tailDir.*);
-    reg.add(new_bit, tailPos);
-    reg.add(new_bit, Velocity{ .vx = 15, .vy = 15 });
-    reg.add(new_bit, SnakePart.tail);
-    reg.add(new_bit, sprites.tail);
+            switch (taild) {
+                .right => tailp.x -= 1,
+                .left => tailp.x += 1,
+                .down => tailp.y -= 1,
+                .up => tailp.y += 1,
+            }
+
+            tailp.fx = @intToFloat(f64, tailp.x);
+            tailp.fy = @intToFloat(f64, tailp.y);
+
+            var new_bit = reg.create();
+            reg.add(new_bit, EntityType.snakeBit);
+            reg.add(new_bit, taild);
+            reg.add(new_bit, tailp);
+            reg.add(new_bit, Velocity{ .vx = 10, .vy = 10 });
+            reg.add(new_bit, SnakePart.tail);
+            reg.add(new_bit, sprites.tail);
+
+            snakeIndex += 1;
+            reg.add(new_bit, SnakeIndex{ .index = snakeIndex });
+        }
+    }
 }
 
 fn spawnFood(reg: *ecs.Registry) void {
-    //var rng = reg.singletons.getConst(Rng).rng.random;
+    // var rng = getRng();
     var rng = std.rand.Xoroshiro128.init(@intCast(u64, std.time.milliTimestamp())).random;
-
     var x = rng.intRangeAtMost(i64, 0, grid_size_x - 1);
     var y = rng.intRangeAtMost(i64, 0, grid_size_y - 1);
     var fx = @intToFloat(f64, x);
@@ -641,7 +689,8 @@ fn spawningSystem(reg: *ecs.Registry) void {
 pub fn main() anyerror!void {
     // Initialization
     //--------------------------------------------------------------------------------------
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
     defer arena.deinit();
 
     const allocator = &arena.allocator;
@@ -662,9 +711,10 @@ pub fn main() anyerror!void {
         reg.add(head, EntityType.snakeBit);
         reg.add(head, Direction.right);
         reg.add(head, Position{ .x = 10, .y = 5, .fx = 10.0, .fy = 5.0 });
-        reg.add(head, Velocity{ .vx = 15, .vy = 15 });
+        reg.add(head, Velocity{ .vx = 10, .vy = 10 });
         reg.add(head, SnakePart.head);
         reg.add(head, sprites.head);
+        reg.add(head, SnakeIndex{ .index = snakeIndex });
 
         const f = reg.create();
         reg.add(f, EntityType.food);
@@ -672,7 +722,7 @@ pub fn main() anyerror!void {
         reg.add(f, sprites.food);
     }
 
-    const fps = 75.0;
+    const fps = 10.0;
     // SetTargetFPS(fps);
     var delta_time: f64 = (1.0 / fps) * 1000.0;
 
@@ -693,6 +743,7 @@ pub fn main() anyerror!void {
 
             inputSystem(&reg);
 
+            //directionSystem(&reg);
             moveSystem(&reg, dt);
 
             collisionSystem(&reg);
