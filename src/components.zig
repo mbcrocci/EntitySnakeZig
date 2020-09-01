@@ -11,8 +11,6 @@ pub const EntityType = enum {
 pub const EntRect = @import("raylib").Rectangle;
 
 pub const Position = struct {
-    x: i64,
-    y: i64,
     fx: f64,
     fy: f64,
 };
